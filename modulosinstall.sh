@@ -35,11 +35,23 @@ log_status() {
     fi
 }
 
-log_header "INÍCIO DA INSTALAÇÃO - $(date '+%d/%m/%Y %H:%M:%S')"
+# Mascara URLs sensíveis nos logs, preservando apenas o nome do arquivo.
+# Exemplo: https://raw.githubusercontent.com/DuiBR/DarkHubModule3/main/modulos.zip -> https://****/modulos.zip
+mask_url() {
+    local source="${1:-}"
+    local file_name="${source##*/}"
+    if [ -n "$file_name" ] && [ "$file_name" != "$source" ]; then
+        echo "https://****/$file_name"
+    else
+        echo "https://****"
+    fi
+}
 
 # Limpa o log anterior e arquivos do diretório (exceto dominios.txt)
 [ -f "$LOG_FILE" ] && rm "$LOG_FILE"
 find "$directory" -type f ! -name 'dominios.txt' -exec rm -f {} + > /dev/null 2>&1
+
+log_header "INÍCIO DA INSTALAÇÃO - $(date '+%d/%m/%Y %H:%M:%S')"
 
 # Finaliza ModuloSinc
 log_header "Finalizando processos ModuloSinc existentes"
@@ -82,7 +94,7 @@ ipaceito=${4:-$ipaceito_default}
 log_header "Configurações"
 log_message "🌐 Domínios: $domains"
 log_message "🔌 Porta: $port"
-log_message "🔑 Server Token: $server_token"
+log_message "🔑 Server Token: ****"
 log_message "📡 IP Aceito: $ipaceito"
 
 # === MELHORIA NO SISTEMA DE DOWNLOAD ===
@@ -105,13 +117,14 @@ download_file() {
     
     while [ $retry_count -lt $max_retries ] && [ $success -eq 0 ]; do
         for source in "${sources[@]}"; do
-            log_message "🔹 Tentando baixar de: $source"
+            masked_source="$(mask_url "$source")"
+            log_message "🔹 Tentando baixar de: $masked_source"
             if wget -q -O "$output_path" "$source"; then
                 success=1
-                log_message "✅ Download bem-sucedido de $source"
+                log_message "✅ Download bem-sucedido de $masked_source"
                 break
             else
-                log_message "🔸 Falha com $source"
+                log_message "🔸 Falha com $masked_source"
             fi
             sleep 1
         done
@@ -174,9 +187,29 @@ for fw in firewalld iptables ufw; do
 done
 
 log_header "Verificando e instalando dependências do sistema"
+export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq > /dev/null 2>&1
-sudo apt-get install -y -qq python3 python3-pip python3-venv python3-distutils curl unzip wget git dos2unix zip tar nano lsof net-tools sudo cron jq bc > /dev/null 2>&1
-log_status $? "Dependências instaladas/verificadas" "Algumas dependências podem ter falhado"
+# Instala dependências de forma tolerante: se um pacote opcional não existir na distro,
+# a instalação dos demais não é abortada. Mantém compatibilidade com Debian/Ubuntu diferentes.
+required_packages=(python3 python3-pip python3-venv curl unzip wget git dos2unix zip tar nano lsof net-tools sudo cron jq bc at netcat-openbsd)
+failed_packages=0
+for pkg in "${required_packages[@]}"; do
+    if dpkg -s "$pkg" >/dev/null 2>&1; then
+        continue
+    fi
+    sudo apt-get install -y -qq "$pkg" > /dev/null 2>&1 || {
+        log_message "⚠️ Não foi possível instalar o pacote: $pkg"
+        ((failed_packages++))
+    }
+done
+# python3-distutils não existe em algumas versões novas do Ubuntu/Debian; tenta sem abortar.
+sudo apt-get install -y -qq python3-distutils > /dev/null 2>&1 || true
+systemctl enable --now atd >/dev/null 2>&1 || true
+if [ "$failed_packages" -eq 0 ]; then
+    log_message "✅ Dependências instaladas/verificadas"
+else
+    log_message "⚠️ Dependências verificadas com $failed_packages pacote(s) opcional(is) pendente(s)."
+fi
 
 log_header "Parando e desabilitando serviços antigos"
 for padrao in 'modulo*.service' 'ModuloSinc*.service' 'ModuloCron*.service'; do
@@ -237,21 +270,25 @@ if [ -f "$ZIP_FILE" ]; then
     if [ $? -eq 0 ]; then
         log_message "✅ Módulos descompactados com sucesso."
         
-        # Verifica se os arquivos essenciais existem
-        essential_files=("ModuloSinc" "ModuloCron.sh" "CorrecaoV2.py")
+        # Verifica somente arquivos que realmente devem vir dentro do modulos.zip.
+        # ModuloCron.sh NÃO é validado aqui porque é gerado dinamicamente abaixo com os dados do painel.
+        essential_files=("ModuloSinc" "CorrecaoV2.py")
         missing_files=0
         
         for file in "${essential_files[@]}"; do
             if [ ! -f "/opt/darkapi/$file" ]; then
                 log_message "❌ $file NÃO encontrado após descompactação!"
                 ((missing_files++))
+            else
+                log_message "✅ $file encontrado após descompactação."
             fi
         done
         
         if [ $missing_files -gt 0 ]; then
-            log_message "⚠️ ATENÇÃO: $missing_files arquivos essenciais faltando no ZIP!"
-            log_message "⚠️ O módulo pode não funcionar corretamente"
+            log_message "❌ ATENÇÃO: $missing_files arquivo(s) essencial(is) faltando no ZIP. Abortando para evitar instalação inconsistente."
+            exit 1
         fi
+        log_message "ℹ️ ModuloCron.sh será criado dinamicamente pelo instalador."
     else
         log_message "❌ Erro ao descompactar módulos. Código de erro: $?"
         log_message "⚠️ Tentando forçar a descompactação com unzip -F"
@@ -278,9 +315,12 @@ After=network.target
 
 [Service]
 Type=simple
+User=root
+WorkingDirectory=/opt/darkapi
 ExecStart=/opt/darkapi/ModuloSinc $server_token $port
 Restart=always
 RestartSec=5
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
@@ -293,9 +333,12 @@ After=network.target
 
 [Service]
 Type=simple
+User=root
+WorkingDirectory=/opt/darkapi
 ExecStart=/bin/bash /opt/darkapi/ModuloCron.sh
 Restart=always
 RestartSec=5
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
@@ -305,39 +348,90 @@ cat << EOF > /opt/darkapi/ModuloCron.sh
 #!/bin/bash
 
 DOMS="/opt/darkapi/dominios.txt"
-while read -r domain; do
+TOKEN="$server_token"
+PAINEL_IP="$ipaceito"
+
+[ ! -f "\$DOMS" ] && touch "\$DOMS"
+
+while IFS= read -r domain || [ -n "\$domain" ]; do
+  domain="\$(echo "\$domain" | xargs)"
+  [ -z "\$domain" ] && continue
+
   while true; do
-    curl -s --ipv4 -X POST \
+    if [ -f /opt/darkapi/limpar_sub.sh ]; then
+      sudo bash /opt/darkapi/limpar_sub.sh >/dev/null 2>&1 || true
+    fi
+
+    if [ -f /opt/darkapi/Onlines.sh ]; then
+      sudo bash /opt/darkapi/Onlines.sh >/dev/null 2>&1 || true
+    fi
+
+    if [ -f /opt/darkapi/Connections.sh ]; then
+      sudo bash /opt/darkapi/Connections.sh >/dev/null 2>&1 || true
+    fi
+
+    curl -s --ipv4 --connect-timeout 5 --max-time 15 -X POST \
       -H "Host: \$domain" \
-      -d "servertoken=$server_token" \
-      "http://$ipaceito/crons.php" > /dev/null
+      -d "servertoken=\$TOKEN" \
+      "http://\$PAINEL_IP/crons.php" >/dev/null 2>&1 || true
+
     sleep 3
   done &
-done < \$DOMS
+done < "\$DOMS"
 wait
 EOF
 
-log_header "Aplicando dos2unix em todos os arquivos"
+chmod +x /opt/darkapi/ModuloCron.sh >/dev/null 2>&1
+if [ -s /opt/darkapi/ModuloCron.sh ]; then
+    log_message "✅ ModuloCron.sh criado dinamicamente com sucesso."
+else
+    log_message "❌ ModuloCron.sh não foi criado corretamente. Abortando."
+    exit 1
+fi
+
+log_header "Aplicando dos2unix em scripts e arquivos de texto"
 if command_exists dos2unix; then
-    find /opt/darkapi -type f -exec dos2unix {} \; >/dev/null 2>&1
-    log_status $? "Conversão dos2unix aplicada com sucesso." "Erro: dos2unix não está instalado."
+    find /opt/darkapi -type f \( -name "*.sh" -o -name "*.py" -o -name "*.txt" -o -name "*.json" \) -exec dos2unix {} \; >/dev/null 2>&1
+    dos2unix /root/modulosinstall.sh >/dev/null 2>&1 || true
+    log_status $? "Conversão dos2unix aplicada com sucesso." "Falha parcial na conversão dos2unix."
 else
     log_message "⚠️ Aviso: dos2unix não está instalado. Pulando conversão."
 fi
 
 log_header "Ajustando permissões"
-chmod -R 777 /opt/darkapi >/dev/null 2>&1
-chmod 777 /etc/systemd/system/ModuloSinc.service /etc/systemd/system/ModuloCron.service >/dev/null 2>&1
+chmod -R 755 /opt/darkapi >/dev/null 2>&1
+chmod +x /opt/darkapi/ModuloSinc /opt/darkapi/ModuloCron.sh /opt/darkapi/*.sh /opt/darkapi/*.py 2>/dev/null || true
+chmod 644 /etc/systemd/system/ModuloSinc.service /etc/systemd/system/ModuloCron.service >/dev/null 2>&1
+# Arquivos gerados pelo módulo precisam ser graváveis pelo root e legíveis pelos serviços.
+touch /opt/darkapi/server.log /opt/darkapi/suspeitos.log /opt/darkapi/sshsync.log 2>/dev/null || true
+chmod 644 /opt/darkapi/*.log 2>/dev/null || true
 
 log_header "Reiniciando e habilitando serviços"
 systemctl daemon-reload >/dev/null 2>&1
 systemctl enable ModuloSinc.service >/dev/null 2>&1
-systemctl start ModuloSinc.service >/dev/null 2>&1
 systemctl restart ModuloSinc.service >/dev/null 2>&1
+sinc_status=$?
 systemctl enable ModuloCron.service >/dev/null 2>&1
-systemctl start ModuloCron.service >/dev/null 2>&1
 systemctl restart ModuloCron.service >/dev/null 2>&1
-log_message "✅ Serviço ModuloSinc.service e ModuloCron.service reiniciados e habilitados com sucesso."
+cron_status=$?
+
+if [ $sinc_status -eq 0 ] && systemctl is-active --quiet ModuloSinc.service; then
+    log_message "✅ ModuloSinc.service está ativo."
+else
+    log_message "❌ ModuloSinc.service não iniciou corretamente."
+    systemctl status ModuloSinc.service --no-pager >> "$LOG_FILE" 2>&1 || true
+    exit 1
+fi
+
+if [ $cron_status -eq 0 ] && systemctl is-active --quiet ModuloCron.service; then
+    log_message "✅ ModuloCron.service está ativo."
+else
+    log_message "❌ ModuloCron.service não iniciou corretamente."
+    systemctl status ModuloCron.service --no-pager >> "$LOG_FILE" 2>&1 || true
+    exit 1
+fi
+
+log_message "✅ Serviço ModuloSinc.service e ModuloCron.service reiniciados, validados e habilitados com sucesso."
 
 log_header "Executando scripts adicionais"
 sleep 1
