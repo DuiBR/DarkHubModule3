@@ -1,15 +1,5 @@
 #!/bin/bash
-# Compatível com execução interativa e execução remota pelo painel.
-# Use --yes ou AUTO_CONFIRM=s para confirmar automaticamente sem prompt.
-if [ -t 1 ] && command -v clear >/dev/null 2>&1; then clear; fi
-AUTO_CONFIRM="${AUTO_CONFIRM:-}"
-for arg in "$@"; do
-  case "$arg" in
-    --yes|-y) AUTO_CONFIRM="s" ;;
-    --no-restore) AUTO_RESTORE="n" ;;
-  esac
-done
-AUTO_RESTORE="${AUTO_RESTORE:-n}"
+clear
 
 RED='\033[1;31m'
 GREEN='\033[1;32m'
@@ -22,7 +12,7 @@ fun_prog() {
   # usa eval para interpretar loops e redirecionamentos corretamente
   eval "$comando" > /dev/null 2>&1 &
   pid=$!
-  if [ -t 1 ] && command -v tput >/dev/null 2>&1; then tput civis; fi
+  tput civis
   echo -ne "\033[1;32m.\033[1;33m.\033[1;31m. \033[1;32m"
   while kill -0 $pid 2>/dev/null; do
     for i in / - \\ \|; do
@@ -30,7 +20,7 @@ fun_prog() {
       echo -ne "\e[1D${i}"
     done
   done
-  if [ -t 1 ] && command -v tput >/dev/null 2>&1; then tput cnorm; fi
+  tput cnorm
   echo -e "\e[1D\033[1;32mOK\033[0m"
   sleep 1
 }
@@ -49,12 +39,7 @@ BACKUP_DIR=$(ls -dt /root/backup_limpeza_* 2>/dev/null | head -n1)
 
 if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
   echo -e "${GREEN}📦 Backup encontrado: ${BACKUP_DIR}${RESET}"
-  if [ "$AUTO_CONFIRM" = "s" ]; then
-    RESTORE="$AUTO_RESTORE"
-    echo -e "${YELLOW}Restauração automática: ${RESTORE}${RESET}"
-  else
-    read -rp $'\033[1;33mDeseja restaurar este backup? (s/N): \033[0m' RESTORE || RESTORE="n"
-  fi
+  read -rp $'\033[1;33mDeseja restaurar este backup? (s/N): \033[0m' RESTORE
   case "$RESTORE" in
     [sS])
       echo -ne "${CYAN}🔄 Restaurando backup...${RESET} "
@@ -82,12 +67,7 @@ if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
   esac
 fi
 
-if [ "$AUTO_CONFIRM" = "s" ]; then
-  confirm="s"
-  echo -e "${YELLOW}Confirmação automática recebida (--yes/AUTO_CONFIRM=s).${RESET}"
-else
-  read -p $'\033[1;31mDeseja continuar com a limpeza? (s/N): \033[0m' confirm || confirm="n"
-fi
+read -p $'\033[1;31mDeseja continuar com a limpeza? (s/N): \033[0m' confirm
 if [[ ! "$confirm" =~ ^[sS]$ ]]; then
   echo -e "${CYAN}❌ Operação cancelada.${RESET}"
   exit 1
@@ -158,7 +138,7 @@ limpar_clients_json() {
                 total_clientes=$(jq '[.inbounds[] | select(.tag == "inbound-sshplus") | .settings.clients[]] | length' "$arquivo" 2>/dev/null)
                 jq '(.inbounds[] | select(.tag == "inbound-sshplus") | .settings.clients) = []' "$arquivo" > "${arquivo}.tmp" && mv "${arquivo}.tmp" "$arquivo"
             fi
-            chmod 644 "$arquivo"
+            chmod 777 "$arquivo"
             echo -e "${CYAN}🔹 Clientes removidos do $tipo: ${YELLOW}$total_clientes${RESET}"
         fi
     fi
